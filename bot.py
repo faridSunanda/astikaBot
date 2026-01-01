@@ -380,11 +380,51 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = get_user_display_name(update.effective_user)
     
     greeting_text = (
-        "Halo {name}! 👋 Saya asisten virtual Program Studi Teknik Informatika.\n\n"
-        "Anda dapat menanyakan apa pun terkait prodi, dan saya akan membantu sebisa mungkin. 😊\n\n"
-        "Silakan bertanya dengan bahasa Anda sendiri. 🙌"
+        "🎓 *Selamat Datang di Chatbot Layanan Informasi* 🎓\n"
+        "*Program Studi Teknik Informatika*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Halo {name}! 👋\n\n"
+        "Saya adalah asisten virtual yang siap membantu Anda mendapatkan informasi seputar "
+        "Program Studi Teknik Informatika dengan cepat dan mudah.\n\n"
+        "📌 *Layanan Informasi yang Tersedia:*\n"
+        "• Informasi akademik (kurikulum, mata kuliah, jadwal)\n"
+        "• Prosedur administrasi (pendaftaran, KRS, transkrip)\n"
+        "• Kegiatan mahasiswa dan organisasi\n"
+        "• Informasi fasilitas dan laboratorium\n"
+        "• Beasiswa dan bantuan pendidikan\n"
+        "• Tugas akhir dan skripsi\n"
+        "• Magang dan kerja praktik\n"
+        "• Dan masih banyak lagi!\n\n"
+        "💡 *Panduan Penggunaan:*\n"
+        "1️⃣ Ketik pertanyaan Anda dengan bahasa sehari-hari\n"
+        "2️⃣ Saya akan memberikan jawaban terbaik yang relevan\n"
+        "3️⃣ Gunakan tombol yang muncul untuk memilih topik terkait\n"
+        "4️⃣ Berikan feedback apakah jawaban sudah membantu\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📝 *Atau pilih pertanyaan di bawah ini:*"
     )
-    await update.message.reply_text(personalize(greeting_text, name))
+    
+    # Tombol opsi pertanyaan populer dari FAQ
+    faqs = load_faq()
+    popular_questions = [
+        {"text": "Siapa saja dosen TI Unwahas?", "index": 3},
+        {"text": "Apa itu HMJTI?", "index": 9},
+        {"text": "Download Pedoman Akademik", "index": 12},
+        {"text": "Dimana lihat kurikulum 2024?", "index": 8},
+        {"text": "Dimana bisa lihat jadwal kuliah?", "index": 4},
+    ]
+    
+    keyboard_buttons = [
+        [InlineKeyboardButton(text=q["text"], callback_data=f"faq::{q['index']}")]
+        for q in popular_questions
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard_buttons)
+    
+    await update.message.reply_text(
+        personalize(greeting_text, name), 
+        parse_mode="Markdown",
+        reply_markup=reply_markup
+    )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -643,7 +683,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =============================
 # MAIN APP
 # =============================
-async def main():
+def main():
     token = TOKEN
     if not token:
         raise RuntimeError(
@@ -656,10 +696,10 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    print("🤖 Bot sedang berjalan. Tekan CTRL+C untuk berhenti.")
-    await app.run_polling(allowed_updates=Update.ALL_TYPES)
+    print("[BOT] Bot sedang berjalan. Tekan CTRL+C untuk berhenti.")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
-    nest_asyncio.apply()
-    asyncio.get_event_loop().run_until_complete(main())
+    main()
+
