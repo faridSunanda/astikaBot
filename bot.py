@@ -30,7 +30,7 @@ logger = logging.getLogger("teknikbot")
 # TOKEN CONFIG
 # =============================
 
-TOKEN = "7739470286:AAENQyesrOL6Bu7R1WMvfIFWiUlBOQ37O_k"
+TOKEN = "8252562412:AAEKjKymaAsG1lXSFskjghbNIA_VLyJBegg"
 FAQ_FILE = "faq.json"
 SIMILARITY_THRESHOLD = 60  # toleransi fuzzy match
 CLARIFICATION_THRESHOLD = 40  # skor minimal untuk ajukan klarifikasi
