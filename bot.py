@@ -7,6 +7,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    ConversationHandler,
     ContextTypes,
     filters,
 )
@@ -32,6 +33,7 @@ logger = logging.getLogger("teknikbot")
 
 TOKEN = "8252562412:AAEKjKymaAsG1lXSFskjghbNIA_VLyJBegg"
 FAQ_FILE = "faq.json"
+ADMIN_ID = 5588770450  # ID Telegram admin yang bisa kelola FAQ
 SIMILARITY_THRESHOLD = 60  # toleransi fuzzy match
 CLARIFICATION_THRESHOLD = 40  # skor minimal untuk ajukan klarifikasi
 
@@ -278,6 +280,17 @@ def load_faq():
     )
 
     return data
+
+
+def is_admin(user_id):
+    return user_id == ADMIN_ID
+
+
+def save_faq(data):
+    """Simpan data FAQ ke file dan invalidasi cache"""
+    with open(FAQ_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    faq_cache["mtime"] = None  # force reload pada panggilan berikutnya
 
 
 def clean_text(text):
@@ -680,6 +693,289 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"- {key}: {value}")
     await update.message.reply_text("\n".join(lines))
 
+
+# =============================
+# FAQ CRUD COMMANDS (ADMIN ONLY)
+# =============================
+async def faq_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tampilkan semua FAQ — /faq_list"""
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Akses ditolak. Hanya admin yang bisa menggunakan perintah ini.")
+        return
+
+    faqs = load_faq()
+    if not faqs:
+        await update.message.reply_text("📋 Belum ada data FAQ.")
+        return
+
+    lines = ["📋 *Daftar FAQ:*\n"]
+    for i, faq in enumerate(faqs, 1):
+        lines.append(f"{i}. *Q:* {faq['question']}")
+        lines.append(f"   *A:* {faq['answer']}\n")
+
+    text = "\n".join(lines)
+
+    # Telegram max 4096 chars per message
+    if len(text) <= 4096:
+        await update.message.reply_text(text, parse_mode="Markdown")
+    else:
+        # Pecah per item
+        chunk = "📋 *Daftar FAQ:*\n\n"
+        for i, faq in enumerate(faqs, 1):
+            entry = f"{i}. *Q:* {faq['question']}\n   *A:* {faq['answer']}\n\n"
+            if len(chunk) + len(entry) > 4096:
+                await update.message.reply_text(chunk, parse_mode="Markdown")
+                chunk = ""
+            chunk += entry
+        if chunk.strip():
+            await update.message.reply_text(chunk, parse_mode="Markdown")
+
+
+# --- ConversationHandler states untuk /faq_add ---
+FAQ_ADD_QUESTION, FAQ_ADD_ANSWER = range(2)
+
+
+async def faq_add_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mulai proses tambah FAQ — Step 1: minta pertanyaan"""
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Akses ditolak. Hanya admin yang bisa menggunakan perintah ini.")
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "➕ *Tambah FAQ Baru*\n\n"
+        "Silakan ketik *pertanyaan* yang ingin ditambahkan:\n\n"
+        "_(Ketik /batal untuk membatalkan)_",
+        parse_mode="Markdown",
+    )
+    return FAQ_ADD_QUESTION
+
+
+async def faq_add_receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 2: terima pertanyaan, minta jawaban"""
+    question = update.message.text.strip()
+    if not question:
+        await update.message.reply_text("⚠️ Pertanyaan tidak boleh kosong. Coba ketik lagi:")
+        return FAQ_ADD_QUESTION
+
+    context.user_data["faq_add_question"] = question
+    await update.message.reply_text(
+        f"📝 Pertanyaan: _{question}_\n\n"
+        "Sekarang ketik *jawaban* untuk pertanyaan di atas:\n\n"
+        "_(Ketik /batal untuk membatalkan)_",
+        parse_mode="Markdown",
+    )
+    return FAQ_ADD_ANSWER
+
+
+async def faq_add_receive_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 3: terima jawaban, simpan FAQ"""
+    answer = update.message.text.strip()
+    if not answer:
+        await update.message.reply_text("⚠️ Jawaban tidak boleh kosong. Coba ketik lagi:")
+        return FAQ_ADD_ANSWER
+
+    question = context.user_data.pop("faq_add_question", "")
+    faqs = load_faq()
+    faqs.append({"question": question, "answer": answer})
+    save_faq(faqs)
+
+    await update.message.reply_text(
+        f"✅ FAQ berhasil ditambahkan!\n\n"
+        f"*Q:* {question}\n"
+        f"*A:* {answer}\n\n"
+        f"Total FAQ sekarang: {len(faqs)}",
+        parse_mode="Markdown",
+    )
+    return ConversationHandler.END
+
+
+# --- ConversationHandler states untuk /faq_edit ---
+FAQ_EDIT_NUMBER, FAQ_EDIT_QUESTION, FAQ_EDIT_ANSWER = range(10, 13)
+
+
+async def faq_edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mulai proses edit FAQ — Step 1: minta nomor FAQ"""
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Akses ditolak. Hanya admin yang bisa menggunakan perintah ini.")
+        return ConversationHandler.END
+
+    # Cek apakah nomor langsung diberikan: /faq_edit 5
+    args_text = update.message.text.replace("/faq_edit", "", 1).strip()
+    if args_text.isdigit():
+        return await _faq_edit_process_number(update, context, args_text)
+
+    faqs = load_faq()
+    await update.message.reply_text(
+        "✏️ *Edit FAQ*\n\n"
+        f"Ketik *nomor FAQ* yang ingin diedit (1 - {len(faqs)}):\n\n"
+        "_(Ketik /batal untuk membatalkan)_",
+        parse_mode="Markdown",
+    )
+    return FAQ_EDIT_NUMBER
+
+
+async def _faq_edit_process_number(update, context, num_text):
+    """Helper: proses nomor FAQ untuk edit"""
+    faqs = load_faq()
+    index = int(num_text) - 1
+    if index < 0 or index >= len(faqs):
+        await update.message.reply_text(f"⚠️ Nomor tidak valid. Tersedia: 1 - {len(faqs)}")
+        return FAQ_EDIT_NUMBER
+
+    context.user_data["faq_edit_index"] = index
+    old = faqs[index]
+    await update.message.reply_text(
+        f"📝 FAQ #{index + 1} saat ini:\n"
+        f"*Q:* {old['question']}\n"
+        f"*A:* {old['answer']}\n\n"
+        "Ketik *pertanyaan baru*:\n\n"
+        "_(Ketik /batal untuk membatalkan)_",
+        parse_mode="Markdown",
+    )
+    return FAQ_EDIT_QUESTION
+
+
+async def faq_edit_receive_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 2: terima nomor FAQ"""
+    text = update.message.text.strip()
+    if not text.isdigit():
+        await update.message.reply_text("⚠️ Ketik angka nomor FAQ saja. Coba lagi:")
+        return FAQ_EDIT_NUMBER
+    return await _faq_edit_process_number(update, context, text)
+
+
+async def faq_edit_receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 3: terima pertanyaan baru, minta jawaban"""
+    question = update.message.text.strip()
+    if not question:
+        await update.message.reply_text("⚠️ Pertanyaan tidak boleh kosong. Coba lagi:")
+        return FAQ_EDIT_QUESTION
+
+    context.user_data["faq_edit_question"] = question
+    await update.message.reply_text(
+        f"📝 Pertanyaan baru: _{question}_\n\n"
+        "Sekarang ketik *jawaban baru*:\n\n"
+        "_(Ketik /batal untuk membatalkan)_",
+        parse_mode="Markdown",
+    )
+    return FAQ_EDIT_ANSWER
+
+
+async def faq_edit_receive_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 4: terima jawaban baru, simpan"""
+    answer = update.message.text.strip()
+    if not answer:
+        await update.message.reply_text("⚠️ Jawaban tidak boleh kosong. Coba lagi:")
+        return FAQ_EDIT_ANSWER
+
+    index = context.user_data.pop("faq_edit_index", 0)
+    question = context.user_data.pop("faq_edit_question", "")
+
+    faqs = load_faq()
+    if index < 0 or index >= len(faqs):
+        await update.message.reply_text("⚠️ Terjadi kesalahan, coba ulangi /faq_edit.")
+        return ConversationHandler.END
+
+    old_q = faqs[index]["question"]
+    faqs[index] = {"question": question, "answer": answer}
+    save_faq(faqs)
+
+    await update.message.reply_text(
+        f"✏️ FAQ #{index + 1} berhasil diubah!\n\n"
+        f"*Sebelumnya:* {old_q}\n"
+        f"*Q baru:* {question}\n"
+        f"*A baru:* {answer}",
+        parse_mode="Markdown",
+    )
+    return ConversationHandler.END
+
+
+async def faq_delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Hapus FAQ — /faq_delete <nomor>"""
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Akses ditolak. Hanya admin yang bisa menggunakan perintah ini.")
+        return
+
+    args_text = update.message.text.replace("/faq_delete", "", 1).strip()
+
+    if not args_text.isdigit():
+        await update.message.reply_text(
+            "⚠️ Format salah.\n\n"
+            "*Cara pakai:*\n"
+            "`/faq_delete <nomor>`\n\n"
+            "*Contoh:*\n"
+            "`/faq_delete 3`",
+            parse_mode="Markdown",
+        )
+        return
+
+    index = int(args_text) - 1  # user pakai 1-based
+    faqs = load_faq()
+
+    if index < 0 or index >= len(faqs):
+        await update.message.reply_text(f"⚠️ Nomor FAQ tidak valid. Tersedia: 1 - {len(faqs)}")
+        return
+
+    removed = faqs.pop(index)
+    save_faq(faqs)
+
+    await update.message.reply_text(
+        f"🗑️ FAQ #{index + 1} berhasil dihapus!\n\n"
+        f"*Q:* {removed['question']}\n\n"
+        f"Sisa FAQ: {len(faqs)}",
+        parse_mode="Markdown",
+    )
+
+# =============================
+# CANCEL / BATAL (shared fallback)
+# =============================
+async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Batalkan proses yang sedang berjalan"""
+    context.user_data.pop("faq_add_question", None)
+    context.user_data.pop("faq_edit_index", None)
+    context.user_data.pop("faq_edit_question", None)
+    await update.message.reply_text("❌ Proses dibatalkan.")
+    return ConversationHandler.END
+
+
+# =============================
+# HELP ADMIN
+# =============================
+async def help_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tampilkan panduan admin"""
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Akses ditolak. Hanya admin yang bisa menggunakan perintah ini.")
+        return
+
+    help_text = (
+        "🔧 *Panduan Admin — Kelola FAQ*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📋 *Lihat Daftar FAQ*\n"
+        "`/faq_list`\n"
+        "Menampilkan semua FAQ beserta nomor urutnya.\n\n"
+        "➕ *Tambah FAQ Baru*\n"
+        "`/faq_add`\n"
+        "Bot akan menanyakan pertanyaan lalu jawaban secara bertahap.\n\n"
+        "✏️ *Edit FAQ*\n"
+        "`/faq_edit` atau `/faq_edit <nomor>`\n"
+        "Bot akan memandu proses edit pertanyaan & jawaban.\n\n"
+        "🗑️ *Hapus FAQ*\n"
+        "`/faq_delete <nomor>`\n"
+        "Hapus FAQ berdasarkan nomor urut.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 *Tips:*\n"
+        "• Gunakan `/faq_list` untuk cek nomor FAQ\n"
+        "• Ketik `/batal` kapan saja untuk membatalkan proses\n"
+        "• Hanya admin yang dapat mengakses perintah ini"
+    )
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
+
 # =============================
 # MAIN APP
 # =============================
@@ -691,8 +987,34 @@ def main():
         )
     app = ApplicationBuilder().token(token).build()
 
+    # ConversationHandler untuk /faq_add (multi-step)
+    faq_add_conv = ConversationHandler(
+        entry_points=[CommandHandler("faq_add", faq_add_cmd)],
+        states={
+            FAQ_ADD_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, faq_add_receive_question)],
+            FAQ_ADD_ANSWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, faq_add_receive_answer)],
+        },
+        fallbacks=[CommandHandler("batal", cancel_conversation)],
+    )
+
+    # ConversationHandler untuk /faq_edit (multi-step)
+    faq_edit_conv = ConversationHandler(
+        entry_points=[CommandHandler("faq_edit", faq_edit_cmd)],
+        states={
+            FAQ_EDIT_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, faq_edit_receive_number)],
+            FAQ_EDIT_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, faq_edit_receive_question)],
+            FAQ_EDIT_ANSWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, faq_edit_receive_answer)],
+        },
+        fallbacks=[CommandHandler("batal", cancel_conversation)],
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("help_admin", help_admin_cmd))
+    app.add_handler(CommandHandler("faq_list", faq_list_cmd))
+    app.add_handler(faq_add_conv)
+    app.add_handler(faq_edit_conv)
+    app.add_handler(CommandHandler("faq_delete", faq_delete_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
 
